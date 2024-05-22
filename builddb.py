@@ -2,11 +2,9 @@ import os
 import time
 import numpy as np
 import librosa
-import pickle
+import sqlite3
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import matplotlib.pyplot as plt
-
 
 def get_mfccs(y, sr):
     try:
@@ -25,15 +23,21 @@ def quantize_mfccs(mfccs, num_bits=8):
         print(f"Error in quantize_mfccs: {e}")
         raise
 
-def generate_hashes(quantized_mfccs, fan_value=15):
+def generate_hashes(quantized_mfccs, min_hashes=10000):
     try:
         hashes = []
-        for i in range(len(quantized_mfccs[0])):
-            for j in range(1, fan_value):
-                if (i + j) < len(quantized_mfccs[0]):
-                    hash_pair = tuple(quantized_mfccs[:, i].tolist() + quantized_mfccs[:, i + j].tolist())
-                    hashes.append(hash_pair)
-        return hashes
+        fan_value = 100
+        while len(hashes) < min_hashes:
+            hashes = []
+            for i in range(len(quantized_mfccs[0])):
+                for j in range(1, fan_value):
+                    if (i + j) < len(quantized_mfccs[0]):
+                        hash_pair = tuple(quantized_mfccs[:, i].tolist() + quantized_mfccs[:, i + j].tolist())
+                        hashes.append((hash_pair, i))  # include offset
+            print(f"Fan value: {fan_value}, Hashes generated: {len(hashes)}")
+            fan_value += 1
+        print(f"Total hashes generated: {len(hashes)}")
+        return hashes[:min_hashes]
     except Exception as e:
         print(f"Error in generate_hashes: {e}")
         raise
@@ -60,8 +64,33 @@ def process_file(file_path):
         print(f"Error processing {file_path}: {e}")
         return file_path, None
 
+def setup_database(database_file):
+    conn = sqlite3.connect(database_file)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fingerprints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash TEXT NOT NULL,
+            offset INTEGER NOT NULL,
+            song_id TEXT NOT NULL,
+            label TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    return conn
+
+def insert_hashes(conn, song_id, label, hashes):
+    cursor = conn.cursor()
+    for hash_pair, offset in hashes:
+        hash_str = ','.join(map(str, hash_pair))
+        cursor.execute('''
+            INSERT INTO fingerprints (hash, offset, song_id, label)
+            VALUES (?, ?, ?, ?)
+        ''', (hash_str, offset, song_id, label))
+    conn.commit()
+
 def build_database(songs_folder, database_file):
-    database = {}
+    conn = setup_database(database_file)
     files_to_process = []
 
     print(f"Scanning folder: {songs_folder}")
@@ -86,19 +115,14 @@ def build_database(songs_folder, database_file):
             for future in as_completed(future_to_file):
                 file_path, song_hashes = future.result()
                 if song_hashes:
-                    database[file_path] = song_hashes
+                    song_id = os.path.splitext(os.path.basename(file_path))[0]
+                    label = os.path.basename(file_path)
+                    insert_hashes(conn, song_id, label, song_hashes)
     except Exception as e:
         print(f"Error during processing: {e}")
 
     end_time = time.time()
-
-    print(f"Saving database to {database_file}")
-    try:
-        with open(database_file, 'wb') as db_file:
-            pickle.dump(database, db_file)
-        print("Database built successfully.")
-    except Exception as e:
-        print(f"Error saving database: {e}")
+    conn.close()
 
     print(f"Total time taken: {end_time - start_time:.2f} seconds")
 

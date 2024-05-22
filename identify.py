@@ -1,10 +1,9 @@
 import os
 import numpy as np
 import librosa
-import pickle
+import sqlite3
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
+from collections import Counter
 
 def get_mfccs(y, sr):
     try:
@@ -30,7 +29,7 @@ def generate_hashes(quantized_mfccs, fan_value=15):
             for j in range(1, fan_value):
                 if (i + j) < len(quantized_mfccs[0]):
                     hash_pair = tuple(quantized_mfccs[:, i].tolist() + quantized_mfccs[:, i + j].tolist())
-                    hashes.add(hash_pair)
+                    hashes.add((hash_pair, i))  # include offset
         return hashes
     except Exception as e:
         print(f"Error in generate_hashes: {e}")
@@ -47,21 +46,13 @@ def fingerprint_song(file_path):
         print(f"Error in fingerprint_song for file {file_path}: {e}")
         raise
 
-def load_database(database_file):
-    try:
-        print("Loading database...")
-        with open(database_file, 'rb') as db_file:
-            database = pickle.load(db_file)
-        print("Database loaded successfully.")
-        return database
-    except Exception as e:
-        print(f"Error loading database: {e}")
-        return None
+def insert_sample_hashes(cursor, sample_hashes):
+    cursor.execute("CREATE TEMP TABLE sample_hashes (hash TEXT, offset INTEGER)")
+    for hash_pair, offset in sample_hashes:
+        hash_str = ','.join(map(str, hash_pair))
+        cursor.execute("INSERT INTO sample_hashes (hash, offset) VALUES (?, ?)", (hash_str, offset))
 
-def compare_hashes(sample_hashes, song_hashes):
-    return len(sample_hashes.intersection(song_hashes))
-
-def identify_sample(database, sample_file):
+def identify_sample(database_file, sample_file):
     try:
         sample_hashes = fingerprint_song(sample_file)
         
@@ -69,19 +60,37 @@ def identify_sample(database, sample_file):
             print("Failed to generate hashes for the sample.")
             return None
 
-        matches = {}
-        with ThreadPoolExecutor() as executor:
-            future_to_song = {executor.submit(compare_hashes, sample_hashes, set(song_hashes)): song_name for song_name, song_hashes in database.items()}
-            for future in tqdm(as_completed(future_to_song), total=len(future_to_song), desc='Comparing fingerprints'):
-                song_name = future_to_song[future]
-                try:
-                    match_count = future.result()
-                    matches[song_name] = match_count
-                except Exception as e:
-                    print(f"Error processing {song_name}: {e}")
+        conn = sqlite3.connect(database_file)
+        cursor = conn.cursor()
+        
+        # Insert sample hashes into a temporary table
+        print("Inserting sample hashes into temporary table...")
+        insert_sample_hashes(cursor, sample_hashes)
+        
+        # Perform SQL query to find matches
+        print("Querying database for matches...")
+        cursor.execute("""
+            SELECT f.song_id, (s.offset - f.offset) as offset_diff
+            FROM fingerprints f
+            JOIN sample_hashes s ON f.hash = s.hash
+        """)
+        
+        results = cursor.fetchall()
+        conn.close()
 
-        best_match = max(matches, key=matches.get)
-        return best_match
+        if not results:
+            print("No matching hashes found in the database.")
+            return None
+
+        # Count the occurrences of each (song_id, offset_diff) pair
+        offset_counter = Counter((song_id, offset_diff) for song_id, offset_diff in results)
+
+        # Find the most common (song_id, offset_diff)
+        most_common = offset_counter.most_common(1)[0][0]
+        identified_song_id = most_common[0]
+        
+        return identified_song_id
+
     except Exception as e:
         print(f"Error identifying sample: {e}")
         return None
@@ -95,15 +104,12 @@ if __name__ == '__main__':
     if not os.path.isfile(args.database):
         print(f"The specified database file does not exist: {args.database}")
     else:
-        database = load_database(args.database)
-        if database:
-            if not os.path.isfile(args.input):
-                print(f"The specified sample file does not exist: {args.input}")
-            else:
-                result = identify_sample(database, args.input)
-                if result:
-                    print(f'Identified song: {result}')
-                else:
-                    print("Identification failed.")
+        if not os.path.isfile(args.input):
+            print(f"The specified sample file does not exist: {args.input}")
         else:
-            print("Database loading failed.")
+            result = identify_sample(args.database, args.input)
+            if result:
+                print(f'Identified song: {result}')
+            else:
+                print("Identification failed.")
+
