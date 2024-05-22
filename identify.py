@@ -4,6 +4,7 @@ import librosa
 import sqlite3
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 def get_mfccs(y, sr):
     try:
@@ -59,58 +60,65 @@ def calculate_similarity(hash1, hash2):
 def calculate_offset_difference(offset1, offset2):
     return abs(offset1 - offset2)
 
+def query_database(database_file, sample_hashes):
+    conn = sqlite3.connect(database_file)
+    cursor = conn.cursor()
+    
+    # Insert sample hashes into a temporary table
+    insert_sample_hashes(cursor, sample_hashes)
+    
+    # Perform SQL query to find matches
+    cursor.execute("""
+        SELECT f.song_id, f.hash, s.hash, s.offset, f.offset
+        FROM fingerprints f
+        JOIN sample_hashes s
+    """)
+    
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
 def identify_sample(database_file, sample_file):
     try:
-        sample_hashes = fingerprint_song(sample_file)
+        with ThreadPoolExecutor() as executor:
+            # Run fingerprint_song in a separate thread
+            future_sample_hashes = executor.submit(fingerprint_song, sample_file)
+            sample_hashes = future_sample_hashes.result()
         
-        if not sample_hashes:
-            print("Failed to generate hashes for the sample.")
-            return None
+            if not sample_hashes:
+                print("Failed to generate hashes for the sample.")
+                return None
 
-        conn = sqlite3.connect(database_file)
-        cursor = conn.cursor()
-        
-        # Insert sample hashes into a temporary table
-        print("Inserting sample hashes into temporary table...")
-        insert_sample_hashes(cursor, sample_hashes)
-        
-        # Perform SQL query to find matches
-        print("Querying database for matches...")
-        cursor.execute("""
-            SELECT f.song_id, f.hash, s.hash, s.offset, f.offset
-            FROM fingerprints f
-            JOIN sample_hashes s
-        """)
-        
-        results = cursor.fetchall()
-        conn.close()
+            # Run query_database in a separate thread
+            future_results = executor.submit(query_database, database_file, sample_hashes)
+            results = future_results.result()
 
-        if not results:
-            print("No matching hashes found in the database.")
-            return None
+            if not results:
+                print("No matching hashes found in the database.")
+                return None
 
-        threshold = 0.8
-        score_counter = Counter()
+            threshold = 0.8
+            score_counter = Counter()
 
-        for song_id, db_hash, sample_hash, sample_offset, db_offset in results:
-            db_hash_list = list(map(int, db_hash.split(',')))
-            sample_hash_list = list(map(int, sample_hash.split(',')))
+            for song_id, db_hash, sample_hash, sample_offset, db_offset in results:
+                db_hash_list = list(map(int, db_hash.split(',')))
+                sample_hash_list = list(map(int, sample_hash.split(',')))
 
-            similarity = calculate_similarity(db_hash_list, sample_hash_list)
-            if similarity >= threshold:
-                offset_difference = calculate_offset_difference(sample_offset, db_offset)
-                # Preference score: higher similarity and smaller offset difference is better
-                score = similarity * (1 - (offset_difference / max(len(db_hash_list), len(sample_hash_list))))
-                score_counter[song_id] += score
+                similarity = calculate_similarity(db_hash_list, sample_hash_list)
+                if similarity >= threshold:
+                    offset_difference = calculate_offset_difference(sample_offset, db_offset)
+                    # Preference score: higher similarity and smaller offset difference is better
+                    score = similarity * (1 - (offset_difference / max(len(db_hash_list), len(sample_hash_list))))
+                    score_counter[song_id] += score
 
-        if not score_counter:
-            print("No similar hashes found in the database.")
-            return None
+            if not score_counter:
+                print("No similar hashes found in the database.")
+                return None
 
-        # Find the song_id with the highest score
-        identified_song_id = score_counter.most_common(1)[0][0]
-        
-        return identified_song_id
+            # Find the song_id with the highest score
+            identified_song_id = score_counter.most_common(1)[0][0]
+            
+            return identified_song_id
 
     except Exception as e:
         print(f"Error identifying sample: {e}")
