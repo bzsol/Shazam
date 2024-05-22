@@ -52,6 +52,10 @@ def insert_sample_hashes(cursor, sample_hashes):
         hash_str = ','.join(map(str, hash_pair))
         cursor.execute("INSERT INTO sample_hashes (hash, offset) VALUES (?, ?)", (hash_str, offset))
 
+def calculate_similarity(hash1, hash2):
+    match_count = sum(1 for a, b in zip(hash1, hash2) if a == b)
+    return match_count / len(hash1)
+
 def identify_sample(database_file, sample_file):
     try:
         sample_hashes = fingerprint_song(sample_file)
@@ -70,9 +74,9 @@ def identify_sample(database_file, sample_file):
         # Perform SQL query to find matches
         print("Querying database for matches...")
         cursor.execute("""
-            SELECT f.song_id, (s.offset - f.offset) as offset_diff
+            SELECT f.song_id, f.hash, s.hash, s.offset - f.offset as offset_diff
             FROM fingerprints f
-            JOIN sample_hashes s ON f.hash = s.hash
+            JOIN sample_hashes s
         """)
         
         results = cursor.fetchall()
@@ -82,8 +86,19 @@ def identify_sample(database_file, sample_file):
             print("No matching hashes found in the database.")
             return None
 
-        # Count the occurrences of each (song_id, offset_diff) pair
-        offset_counter = Counter((song_id, offset_diff) for song_id, offset_diff in results)
+        threshold = 0.8
+        offset_counter = Counter()
+        
+        for song_id, db_hash, sample_hash, offset_diff in results:
+            db_hash_list = list(map(int, db_hash.split(',')))
+            sample_hash_list = list(map(int, sample_hash.split(',')))
+            
+            if calculate_similarity(db_hash_list, sample_hash_list) >= threshold:
+                offset_counter[(song_id, offset_diff)] += 1
+
+        if not offset_counter:
+            print("No similar hashes found in the database.")
+            return None
 
         # Find the most common (song_id, offset_diff)
         most_common = offset_counter.most_common(1)[0][0]
@@ -112,4 +127,3 @@ if __name__ == '__main__':
                 print(f'Identified song: {result}')
             else:
                 print("Identification failed.")
-
