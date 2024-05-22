@@ -56,6 +56,9 @@ def calculate_similarity(hash1, hash2):
     match_count = sum(1 for a, b in zip(hash1, hash2) if a == b)
     return match_count / len(hash1)
 
+def calculate_offset_difference(offset1, offset2):
+    return abs(offset1 - offset2)
+
 def identify_sample(database_file, sample_file):
     try:
         sample_hashes = fingerprint_song(sample_file)
@@ -74,7 +77,7 @@ def identify_sample(database_file, sample_file):
         # Perform SQL query to find matches
         print("Querying database for matches...")
         cursor.execute("""
-            SELECT f.song_id, f.hash, s.hash, s.offset - f.offset as offset_diff
+            SELECT f.song_id, f.hash, s.hash, s.offset, f.offset
             FROM fingerprints f
             JOIN sample_hashes s
         """)
@@ -87,22 +90,25 @@ def identify_sample(database_file, sample_file):
             return None
 
         threshold = 0.8
-        offset_counter = Counter()
-        
-        for song_id, db_hash, sample_hash, offset_diff in results:
+        score_counter = Counter()
+
+        for song_id, db_hash, sample_hash, sample_offset, db_offset in results:
             db_hash_list = list(map(int, db_hash.split(',')))
             sample_hash_list = list(map(int, sample_hash.split(',')))
-            
-            if calculate_similarity(db_hash_list, sample_hash_list) >= threshold:
-                offset_counter[(song_id, offset_diff)] += 1
 
-        if not offset_counter:
+            similarity = calculate_similarity(db_hash_list, sample_hash_list)
+            if similarity >= threshold:
+                offset_difference = calculate_offset_difference(sample_offset, db_offset)
+                # Preference score: higher similarity and smaller offset difference is better
+                score = similarity * (1 - (offset_difference / max(len(db_hash_list), len(sample_hash_list))))
+                score_counter[song_id] += score
+
+        if not score_counter:
             print("No similar hashes found in the database.")
             return None
 
-        # Find the most common (song_id, offset_diff)
-        most_common = offset_counter.most_common(1)[0][0]
-        identified_song_id = most_common[0]
+        # Find the song_id with the highest score
+        identified_song_id = score_counter.most_common(1)[0][0]
         
         return identified_song_id
 
