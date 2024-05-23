@@ -23,19 +23,14 @@ def quantize_mfccs(mfccs, num_bits=8):
         print(f"Error in quantize_mfccs: {e}")
         raise
 
-def generate_hashes(quantized_mfccs, min_hashes=10000):
+def generate_hashes(quantized_mfccs, fan_value=100, min_hashes=10000):
     try:
         hashes = []
-        fan_value = 100
-        while len(hashes) < min_hashes:
-            hashes = []
-            for i in range(len(quantized_mfccs[0])):
-                for j in range(1, fan_value):
-                    if (i + j) < len(quantized_mfccs[0]):
-                        hash_pair = tuple(quantized_mfccs[:, i].tolist() + quantized_mfccs[:, i + j].tolist())
-                        hashes.append((hash_pair, i))  # include offset
-            print(f"Fan value: {fan_value}, Hashes generated: {len(hashes)}")
-            fan_value += 1
+        for i in range(len(quantized_mfccs[0])):
+            for j in range(1, fan_value):
+                if (i + j) < len(quantized_mfccs[0]):
+                    hash_pair = tuple(quantized_mfccs[:, i].tolist() + quantized_mfccs[:, i + j].tolist())
+                    hashes.append((hash_pair, i))  # include offset
         print(f"Total hashes generated: {len(hashes)}")
         return hashes[:min_hashes]
     except Exception as e:
