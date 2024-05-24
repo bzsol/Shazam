@@ -26,7 +26,7 @@ def get_spectrogram(y, sr):
 
 def find_peaks(spectrogram, threshold=20):
     try:
-        spectrogram_cp = cp.array(spectrogram)
+        spectrogram_cp = cp.asarray(spectrogram)  # Use asarray to avoid copying if already on GPU
         
         # Identify local maxima in the spectrogram
         neighborhood_size = (3, 3)
@@ -38,7 +38,6 @@ def find_peaks(spectrogram, threshold=20):
         maxima[diff] = False
         
         peaks = cp.argwhere(maxima)
-        peaks = cp.asnumpy(peaks)
         return peaks
     except Exception as e:
         logging.error(f"Error in find_peaks: {e}", exc_info=True)
@@ -46,6 +45,7 @@ def find_peaks(spectrogram, threshold=20):
 
 def generate_hashes(peaks, fan_value=15):
     try:
+        peaks = cp.asnumpy(peaks)  # Convert to numpy array only once for CPU operations
         hashes = []
         num_peaks = len(peaks)
         for i in range(num_peaks):
