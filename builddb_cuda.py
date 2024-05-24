@@ -2,17 +2,16 @@ import os
 import time
 import numpy as np
 import librosa
-import scipy.ndimage
+import cupy as cp
+import cupyx.scipy.ndimage
 import sqlite3
 import argparse
-import cupy as cp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def get_spectrogram(y, sr):
     try:
-        y_gpu = cp.array(y)
-        S = cp.abs(cp.fft.rfft(y_gpu, n=2048, axis=0, norm="ortho"))
-        S_db = librosa.amplitude_to_db(cp.asnumpy(S), ref=np.max)
+        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
+        S_db = librosa.amplitude_to_db(S, ref=np.max)
         return S_db
     except Exception as e:
         print(f"Error in get_spectrogram: {e}")
@@ -20,19 +19,19 @@ def get_spectrogram(y, sr):
 
 def find_peaks(spectrogram, threshold=20):
     try:
-        # Convert to GPU array
-        spectrogram_gpu = cp.array(spectrogram)
+        spectrogram_cp = cp.array(spectrogram)
         
         # Identify local maxima in the spectrogram
         neighborhood_size = (3, 3)
-        data_max = cp.asnumpy(cp.ndimage.maximum_filter(spectrogram_gpu, size=neighborhood_size))
-        maxima = (spectrogram == data_max)
+        data_max = cupyx.scipy.ndimage.maximum_filter(spectrogram_cp, size=neighborhood_size)
+        maxima = (spectrogram_cp == data_max)
         
         # Apply threshold
-        diff = (data_max - spectrogram) > threshold
+        diff = (data_max - spectrogram_cp) > threshold
         maxima[diff] = False
         
-        peaks = np.argwhere(maxima)
+        peaks = cp.argwhere(maxima)
+        peaks = cp.asnumpy(peaks)
         return peaks
     except Exception as e:
         print(f"Error in find_peaks: {e}")
@@ -49,6 +48,7 @@ def generate_hashes(peaks, fan_value=15):
                     freq2, time2 = peaks[i + j]
                     hash_pair = (freq1, freq2, time2 - time1)
                     hashes.append((hash_pair, time1))  # include offset
+        print(f"Total hashes generated: {len(hashes)}")
         return hashes
     except Exception as e:
         print(f"Error in generate_hashes: {e}")
@@ -93,6 +93,7 @@ def setup_database(database_file):
 
 def insert_hashes(conn, song_id, label, hashes):
     cursor = conn.cursor()
+    # Use executemany to batch insert for efficiency
     data_to_insert = [
         (','.join(map(str, hash_pair)), offset, song_id, label)
         for hash_pair, offset in hashes
@@ -111,7 +112,7 @@ def build_database(songs_folder, database_file):
 
     for root, _, files in os.walk(songs_folder):
         for file in files:
-            if file.endswith(('.mp3', '.wav')):
+            if file.endswith('.mp3') or file.endswith('.wav'):
                 file_path = os.path.join(root, file)
                 files_to_process.append(file_path)
                 print(f"Found file: {file_path}")
