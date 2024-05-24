@@ -5,17 +5,14 @@ import librosa
 import scipy.ndimage
 import sqlite3
 import argparse
+import cupy as cp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
-# https://developer.nvidia.com/cuda-toolkit
-# python -m pip install -U setuptools pip
-#  pip install cupy -vvvv
-
 
 def get_spectrogram(y, sr):
     try:
-        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
-        S_db = librosa.amplitude_to_db(S, ref=np.max)
+        y_gpu = cp.array(y)
+        S = cp.abs(cp.fft.rfft(y_gpu, n=2048, axis=0, norm="ortho"))
+        S_db = librosa.amplitude_to_db(cp.asnumpy(S), ref=np.max)
         return S_db
     except Exception as e:
         print(f"Error in get_spectrogram: {e}")
@@ -23,9 +20,12 @@ def get_spectrogram(y, sr):
 
 def find_peaks(spectrogram, threshold=20):
     try:
+        # Convert to GPU array
+        spectrogram_gpu = cp.array(spectrogram)
+        
         # Identify local maxima in the spectrogram
         neighborhood_size = (3, 3)
-        data_max = scipy.ndimage.maximum_filter(spectrogram, size=neighborhood_size)
+        data_max = cp.asnumpy(cp.ndimage.maximum_filter(spectrogram_gpu, size=neighborhood_size))
         maxima = (spectrogram == data_max)
         
         # Apply threshold
