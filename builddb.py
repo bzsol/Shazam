@@ -2,37 +2,49 @@ import os
 import time
 import numpy as np
 import librosa
+import scipy.ndimage
 import sqlite3
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def get_mfccs(y, sr):
+def get_spectrogram(y, sr):
     try:
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
-        mfccs_delta = librosa.feature.delta(mfccs)
-        return mfccs_delta
+        S = np.abs(librosa.stft(y))
+        S_db = librosa.amplitude_to_db(S, ref=np.max)
+        return S_db
     except Exception as e:
-        print(f"Error in get_mfccs: {e}")
+        print(f"Error in get_spectrogram: {e}")
         raise
 
-def quantize_mfccs(mfccs, num_bits=8):
+def find_peaks(spectrogram, threshold=20):
     try:
-        quantized_mfccs = np.round((mfccs - np.min(mfccs)) / (np.max(mfccs) - np.min(mfccs)) * (2 ** num_bits - 1))
-        return quantized_mfccs.astype(np.uint8)
+        # Identify local maxima in the spectrogram
+        neighborhood_size = (3, 3)
+        data_max = scipy.ndimage.maximum_filter(spectrogram, size=neighborhood_size)
+        maxima = (spectrogram == data_max)
+        
+        # Apply threshold
+        diff = (data_max - spectrogram) > threshold
+        maxima[diff] = False
+        
+        peaks = np.argwhere(maxima)
+        return peaks
     except Exception as e:
-        print(f"Error in quantize_mfccs: {e}")
+        print(f"Error in find_peaks: {e}")
         raise
 
-def generate_hashes(quantized_mfccs, fan_value=100, min_hashes=10000):
+def generate_hashes(peaks, fan_value=15):
     try:
         hashes = []
-        for i in range(len(quantized_mfccs[0])):
+        for i in range(len(peaks)):
             for j in range(1, fan_value):
-                if (i + j) < len(quantized_mfccs[0]):
-                    hash_pair = tuple(quantized_mfccs[:, i].tolist() + quantized_mfccs[:, i + j].tolist())
-                    hashes.append((hash_pair, i))  # include offset
+                if (i + j) < len(peaks):
+                    freq1, time1 = peaks[i]
+                    freq2, time2 = peaks[i + j]
+                    hash_pair = (freq1, freq2, time2 - time1)
+                    hashes.append((hash_pair, time1))  # include offset
         print(f"Total hashes generated: {len(hashes)}")
-        return hashes[:min_hashes]
+        return hashes
     except Exception as e:
         print(f"Error in generate_hashes: {e}")
         raise
@@ -40,9 +52,9 @@ def generate_hashes(quantized_mfccs, fan_value=100, min_hashes=10000):
 def fingerprint_song(file_path):
     try:
         y, sr = librosa.load(file_path, sr=None)  # Load with native sampling rate
-        mfccs = get_mfccs(y, sr)
-        quantized_mfccs = quantize_mfccs(mfccs)
-        hashes = generate_hashes(quantized_mfccs)
+        spectrogram = get_spectrogram(y, sr)
+        peaks = find_peaks(spectrogram)
+        hashes = generate_hashes(peaks)
         return hashes
     except Exception as e:
         print(f"Error in fingerprint_song for file {file_path}: {e}")
