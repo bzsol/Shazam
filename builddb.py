@@ -6,6 +6,10 @@ import scipy.ndimage
 import sqlite3
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import logging
+
+# Configure logging
+logging.basicConfig(filename='database_builder.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def get_spectrogram(y, sr):
     try:
@@ -13,7 +17,7 @@ def get_spectrogram(y, sr):
         S_db = librosa.amplitude_to_db(S, ref=np.max)
         return S_db
     except Exception as e:
-        print(f"Error in get_spectrogram: {e}")
+        logging.error(f"Error in get_spectrogram: {e}", exc_info=True)
         raise
 
 def find_peaks(spectrogram, threshold=20):
@@ -30,7 +34,7 @@ def find_peaks(spectrogram, threshold=20):
         peaks = np.argwhere(maxima)
         return peaks
     except Exception as e:
-        print(f"Error in find_peaks: {e}")
+        logging.error(f"Error in find_peaks: {e}", exc_info=True)
         raise
 
 def generate_hashes(peaks, fan_value=15):
@@ -44,10 +48,10 @@ def generate_hashes(peaks, fan_value=15):
                     freq2, time2 = peaks[i + j]
                     hash_pair = (freq1, freq2, time2 - time1)
                     hashes.append((hash_pair, time1))  # include offset
-        print(f"Total hashes generated: {len(hashes)}")
+        logging.info(f"Total hashes generated: {len(hashes)}")
         return hashes
     except Exception as e:
-        print(f"Error in generate_hashes: {e}")
+        logging.error(f"Error in generate_hashes: {e}", exc_info=True)
         raise
 
 def fingerprint_song(file_path):
@@ -58,7 +62,7 @@ def fingerprint_song(file_path):
         hashes = generate_hashes(peaks)
         return hashes
     except Exception as e:
-        print(f"Error in fingerprint_song for file {file_path}: {e}")
+        logging.error(f"Error in fingerprint_song for file {file_path}: {e}", exc_info=True)
         raise
 
 def process_file(file_path):
@@ -66,10 +70,10 @@ def process_file(file_path):
         start_time = time.time()
         hashes = fingerprint_song(file_path)
         end_time = time.time()
-        print(f"Successfully processed: {file_path} in {end_time - start_time:.2f} seconds")
+        logging.info(f"Successfully processed: {file_path} in {end_time - start_time:.2f} seconds")
         return file_path, hashes
     except Exception as e:
-        print(f"Error processing {file_path}: {e}")
+        logging.error(f"Error processing {file_path}: {e}", exc_info=True)
         return file_path, None
 
 def setup_database(database_file):
@@ -104,20 +108,20 @@ def build_database(songs_folder, database_file):
     conn = setup_database(database_file)
     files_to_process = []
 
-    print(f"Scanning folder: {songs_folder}")
+    logging.info(f"Scanning folder: {songs_folder}")
 
     for root, _, files in os.walk(songs_folder):
         for file in files:
             if file.endswith('.mp3') or file.endswith('.wav'):
                 file_path = os.path.join(root, file)
                 files_to_process.append(file_path)
-                print(f"Found file: {file_path}")
+                logging.info(f"Found file: {file_path}")
 
     if not files_to_process:
-        print("No audio files found in the specified folder.")
+        logging.warning("No audio files found in the specified folder.")
         return
 
-    print(f"Starting to process {len(files_to_process)} files...")
+    logging.info(f"Starting to process {len(files_to_process)} files...")
 
     start_time = time.time()
     try:
@@ -130,12 +134,12 @@ def build_database(songs_folder, database_file):
                     label = os.path.basename(file_path)
                     insert_hashes(conn, song_id, label, song_hashes)
     except Exception as e:
-        print(f"Error during processing: {e}")
+        logging.error(f"Error during processing: {e}", exc_info=True)
 
     end_time = time.time()
     conn.close()
 
-    print(f"Total time taken: {end_time - start_time:.2f} seconds")
+    logging.info(f"Total time taken: {end_time - start_time:.2f} seconds")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Build fingerprint database.')
@@ -144,8 +148,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     if not os.path.isdir(args.input):
-        print(f"The specified input folder does not exist: {args.input}")
+        logging.error(f"The specified input folder does not exist: {args.input}")
     else:
-        print("Starting database build process...")
+        logging.info("Starting database build process...")
         build_database(args.input, args.output)
-        print("Database build process completed.")
+        logging.info("Database build process completed.")
