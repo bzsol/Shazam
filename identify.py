@@ -5,38 +5,47 @@ import sqlite3
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from scipy.ndimage import maximum_filter
 
-def get_mfccs(y, sr):
+def get_spectrogram(y, sr):
     try:
-        print("Extracting MFCCs...")
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
-        mfccs_delta = librosa.feature.delta(mfccs)
-        print("MFCCs extracted successfully.")
-        return mfccs_delta
+        print("Extracting spectrogram...")
+        S = np.abs(librosa.stft(y))
+        print("Spectrogram extracted successfully.")
+        return S
     except Exception as e:
-        print(f"Error in get_mfccs: {e}")
+        print(f"Error in get_spectrogram: {e}")
         raise
 
-def quantize_mfccs(mfccs, num_bits=8):
+def find_peaks(spectrogram, threshold=0.8):
     try:
-        print("Quantizing MFCCs...")
-        quantized_mfccs = np.round((mfccs - np.min(mfccs)) / (np.max(mfccs) - np.min(mfccs)) * (2 ** num_bits - 1))
-        print("MFCCs quantized successfully.")
-        return quantized_mfccs.astype(np.uint8)
+        print("Finding peaks in spectrogram...")
+        local_max = maximum_filter(spectrogram, size=20) == spectrogram
+        background = (spectrogram == 0)
+        eroded_background = maximum_filter(background, size=20) == background
+        detected_peaks = local_max ^ eroded_background
+        
+        peaks = np.argwhere(detected_peaks)
+        peaks = peaks[spectrogram[detected_peaks] > np.max(spectrogram) * threshold]
+        print(f"Found {len(peaks)} peaks.")
+        return peaks
     except Exception as e:
-        print(f"Error in quantize_mfccs: {e}")
+        print(f"Error in find_peaks: {e}")
         raise
 
-def generate_hashes(quantized_mfccs, fan_value=15):
+def generate_hashes(peaks, fan_value=15):
     try:
         print("Generating hashes...")
-        hashes = set()
-        for i in range(len(quantized_mfccs[0])):
+        hashes = []
+        num_peaks = len(peaks)
+        for i in range(num_peaks):
             for j in range(1, fan_value):
-                if (i + j) < len(quantized_mfccs[0]):
-                    hash_pair = tuple(quantized_mfccs[:, i].tolist() + quantized_mfccs[:, i + j].tolist())
-                    hashes.add((hash_pair, i))  # include offset
-        print(f"Generated {len(hashes)} hashes.")
+                if (i + j) < num_peaks:
+                    freq1, time1 = peaks[i]
+                    freq2, time2 = peaks[i + j]
+                    hash_pair = (freq1, freq2, time2 - time1)
+                    hashes.append((hash_pair, time1))
+        print(f"Total hashes generated: {len(hashes)}")
         return hashes
     except Exception as e:
         print(f"Error in generate_hashes: {e}")
@@ -46,9 +55,9 @@ def fingerprint_song(file_path):
     try:
         print(f"Fingerprinting song: {file_path}")
         y, sr = librosa.load(file_path, sr=None)  # Load with native sampling rate
-        mfccs = get_mfccs(y, sr)
-        quantized_mfccs = quantize_mfccs(mfccs)
-        hashes = generate_hashes(quantized_mfccs)
+        spectrogram = get_spectrogram(y, sr)
+        peaks = find_peaks(spectrogram)
+        hashes = generate_hashes(peaks)
         return hashes
     except Exception as e:
         print(f"Error in fingerprint_song for file {file_path}: {e}")
@@ -110,6 +119,9 @@ def identify_sample(database_file, sample_file, batch_size=100):
 
         offset_counter = Counter()
         for song_id, db_hash, db_offset, sample_offset in results:
+            # Ensure db_offset and sample_offset are decoded to integers
+            db_offset = int.from_bytes(db_offset, byteorder='big', signed=True) if isinstance(db_offset, bytes) else int(db_offset)
+            sample_offset = int.from_bytes(sample_offset, byteorder='big', signed=True) if isinstance(sample_offset, bytes) else int(sample_offset)
             offset_diff = db_offset - sample_offset
             offset_counter[(song_id, offset_diff)] += 1
 
@@ -117,7 +129,6 @@ def identify_sample(database_file, sample_file, batch_size=100):
             print("No similar hashes found in the database.")
             return None
 
-        # Find the song ID with the most common offset difference
         best_match = max(offset_counter.items(), key=lambda x: x[1])
         identified_song_id = best_match[0][0]
         

@@ -5,11 +5,11 @@ import librosa
 import scipy.ndimage
 import sqlite3
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def get_spectrogram(y, sr):
     try:
-        S = np.abs(librosa.stft(y))
+        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
         S_db = librosa.amplitude_to_db(S, ref=np.max)
         return S_db
     except Exception as e:
@@ -36,9 +36,10 @@ def find_peaks(spectrogram, threshold=20):
 def generate_hashes(peaks, fan_value=15):
     try:
         hashes = []
-        for i in range(len(peaks)):
+        num_peaks = len(peaks)
+        for i in range(num_peaks):
             for j in range(1, fan_value):
-                if (i + j) < len(peaks):
+                if (i + j) < num_peaks:
                     freq1, time1 = peaks[i]
                     freq2, time2 = peaks[i + j]
                     hash_pair = (freq1, freq2, time2 - time1)
@@ -88,12 +89,15 @@ def setup_database(database_file):
 
 def insert_hashes(conn, song_id, label, hashes):
     cursor = conn.cursor()
-    for hash_pair, offset in hashes:
-        hash_str = ','.join(map(str, hash_pair))
-        cursor.execute('''
-            INSERT INTO fingerprints (hash, offset, song_id, label)
-            VALUES (?, ?, ?, ?)
-        ''', (hash_str, offset, song_id, label))
+    # Use executemany to batch insert for efficiency
+    data_to_insert = [
+        (','.join(map(str, hash_pair)), offset, song_id, label)
+        for hash_pair, offset in hashes
+    ]
+    cursor.executemany('''
+        INSERT INTO fingerprints (hash, offset, song_id, label)
+        VALUES (?, ?, ?, ?)
+    ''', data_to_insert)
     conn.commit()
 
 def build_database(songs_folder, database_file):
@@ -117,7 +121,7 @@ def build_database(songs_folder, database_file):
 
     start_time = time.time()
     try:
-        with ThreadPoolExecutor() as executor:
+        with ProcessPoolExecutor() as executor:
             future_to_file = {executor.submit(process_file, file_path): file_path for file_path in files_to_process}
             for future in as_completed(future_to_file):
                 file_path, song_hashes = future.result()
