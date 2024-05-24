@@ -45,8 +45,15 @@ def generate_hashes_and_insert(peaks, song_id, label, conn, fan_value=15, max_re
             for i in range(num_peaks):
                 for j in range(1, fan_value):
                     if (i + j) < num_peaks:
-                        freq1, time1 = peaks[i]
-                        freq2, time2 = peaks[i + j]
+                        freq1_index, time1_frame = peaks[i]
+                        freq2_index, time2_frame = peaks[i + j]
+
+                        # Convert frame indices and FFT bin indices to physical units
+                        freq1 = librosa.fft_frequencies(freq1_index, 2048)
+                        freq2 = librosa.fft_frequencies(freq2_index, 2048)
+                        time1 = librosa.frames_to_samples(time1_frame, 2048, 512)
+                        time2 = librosa.frames_to_samples(time2_frame, 2048, 512)
+
                         hash_pair = (freq1, freq2, time2 - time1)
                         hash_str = ','.join(map(str, hash_pair))
                         cursor.execute('''
@@ -68,6 +75,7 @@ def generate_hashes_and_insert(peaks, song_id, label, conn, fan_value=15, max_re
         except Exception as e:
             logging.error(f"Error in generate_hashes_and_insert: {e}", exc_info=True)
             raise
+
 
 def fingerprint_song_and_insert(file_path, database_file):
     try:
