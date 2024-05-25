@@ -36,23 +36,28 @@ def find_peaks(spectrogram, threshold=20):
         logging.error(f"Error in find_peaks: {e}", exc_info=True)
         raise
 
-def generate_hashes_and_insert(peaks, song_id, label, conn, fan_value=15, max_retries=5):
+def generate_hashes_and_insert(peaks, song_id, label, conn, sr,fan_value=15, max_retries=5):
     retries = 0
+    sample_rate = sr  # Assuming a common sample rate if not specified
+    fft_bin_count = 2048  # The number of FFT bins used
+    hop_length = 512      # The hop length used in STFT
+
     while retries < max_retries:
         try:
             cursor = conn.cursor()
             num_peaks = len(peaks)
+            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=fft_bin_count)
+
             for i in range(num_peaks):
                 for j in range(1, fan_value):
                     if (i + j) < num_peaks:
                         freq1_index, time1_frame = peaks[i]
                         freq2_index, time2_frame = peaks[i + j]
 
-                        # Convert frame indices and FFT bin indices to physical units
-                        freq1 = librosa.fft_frequencies(freq1_index, 2048)
-                        freq2 = librosa.fft_frequencies(freq2_index, 2048)
-                        time1 = librosa.frames_to_samples(time1_frame, 2048, 512)
-                        time2 = librosa.frames_to_samples(time2_frame, 2048, 512)
+                        freq1 = freqs[freq1_index]
+                        freq2 = freqs[freq2_index]
+                        time1 = librosa.frames_to_samples(time1_frame, hop_length=hop_length) / sample_rate
+                        time2 = librosa.frames_to_samples(time2_frame, hop_length=hop_length) / sample_rate
 
                         hash_pair = (freq1, freq2, time2 - time1)
                         hash_str = ','.join(map(str, hash_pair))
@@ -65,7 +70,7 @@ def generate_hashes_and_insert(peaks, song_id, label, conn, fan_value=15, max_re
             return
         except OperationalError as e:
             if 'database is locked' in str(e):
-                retries += 0.5
+                retries += 1
                 sleep_time = 2 ** retries  # Exponential backoff
                 logging.warning(f"Database is locked, retrying in {sleep_time} seconds...")
                 time.sleep(sleep_time)
@@ -75,7 +80,6 @@ def generate_hashes_and_insert(peaks, song_id, label, conn, fan_value=15, max_re
         except Exception as e:
             logging.error(f"Error in generate_hashes_and_insert: {e}", exc_info=True)
             raise
-
 
 def fingerprint_song_and_insert(file_path, database_file):
     try:
@@ -87,7 +91,7 @@ def fingerprint_song_and_insert(file_path, database_file):
         
         conn = sqlite3.connect(database_file)  # Create a new connection for each thread
         try:
-            generate_hashes_and_insert(peaks, song_id, label, conn)
+            generate_hashes_and_insert(peaks, song_id, label, conn, sr)
         finally:
             conn.close()  # Close the connection after use
     except Exception as e:
@@ -95,20 +99,38 @@ def fingerprint_song_and_insert(file_path, database_file):
         raise
 
 def setup_database(database_file):
-    conn = sqlite3.connect(database_file)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS fingerprints (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hash TEXT NOT NULL,
-            offset INTEGER NOT NULL,
-            song_id TEXT NOT NULL,
-            label TEXT NOT NULL
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    logging.info(f"Database setup completed for {database_file}")
+    retries = 0
+    max_retries = 5
+    while retries < max_retries:
+        try:
+            conn = sqlite3.connect(database_file)
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS fingerprints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hash TEXT NOT NULL,
+                    offset INTEGER NOT NULL,
+                    song_id TEXT NOT NULL,
+                    label TEXT NOT NULL
+                )
+            ''')
+            conn.commit()
+            conn.close()
+            logging.info(f"Database setup completed for {database_file}")
+            return
+        except OperationalError as e:
+            if 'database is locked' in str(e):
+                retries += 1
+                sleep_time = 2 ** retries  # Exponential backoff
+                logging.warning(f"Database is locked, retrying in {sleep_time} seconds...")
+                time.sleep(sleep_time)
+            else:
+                logging.error(f"OperationalError in setup_database: {e}", exc_info=True)
+                raise
+        except Exception as e:
+            logging.error(f"Error in setup_database: {e}", exc_info=True)
+            raise
+    raise OperationalError("Maximum retries reached while setting up the database.")
 
 def build_database(songs_folder, database_file, num_threads=4):
     setup_database(database_file)
