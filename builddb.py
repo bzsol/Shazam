@@ -140,4 +140,3 @@ if __name__ == '__main__':
         logging.info("Starting database build process...")
         build_database(args.input, args.output)
         logging.info("Database build process completed.")
-

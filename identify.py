@@ -5,28 +5,28 @@ import sqlite3
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from scipy.ndimage import maximum_filter
+import scipy.ndimage
 
 def get_spectrogram(y, sr):
     try:
         print("Extracting spectrogram...")
-        S = np.abs(librosa.stft(y))
+        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
+        S_db = librosa.amplitude_to_db(S, ref=np.max)
         print("Spectrogram extracted successfully.")
-        return S
+        return S_db
     except Exception as e:
         print(f"Error in get_spectrogram: {e}")
         raise
 
-def find_peaks(spectrogram, threshold=0.8):
+def find_peaks(spectrogram, threshold=20):
     try:
         print("Finding peaks in spectrogram...")
-        local_max = maximum_filter(spectrogram, size=20) == spectrogram
-        background = (spectrogram == 0)
-        eroded_background = maximum_filter(background, size=20) == background
-        detected_peaks = local_max ^ eroded_background
-        
-        peaks = np.argwhere(detected_peaks)
-        peaks = peaks[spectrogram[detected_peaks] > np.max(spectrogram) * threshold]
+        neighborhood_size = (3, 3)
+        data_max = scipy.ndimage.maximum_filter(spectrogram, size=neighborhood_size)
+        maxima = (spectrogram == data_max)
+        diff = (data_max - spectrogram) > threshold
+        maxima[diff] = False
+        peaks = np.argwhere(maxima)
         print(f"Found {len(peaks)} peaks.")
         return peaks
     except Exception as e:
@@ -69,15 +69,13 @@ def generate_hashes(peaks, sr, fan_value=15):
         print(f"Error in generate_hashes: {e}")
         raise
 
-
-
 def fingerprint_song(file_path):
     try:
         print(f"Fingerprinting song: {file_path}")
         y, sr = librosa.load(file_path, sr=None)  # Load with native sampling rate
         spectrogram = get_spectrogram(y, sr)
         peaks = find_peaks(spectrogram)
-        hashes = generate_hashes(peaks,sr)
+        hashes = generate_hashes(peaks, sr)
         return hashes
     except Exception as e:
         print(f"Error in fingerprint_song for file {file_path}: {e}")
