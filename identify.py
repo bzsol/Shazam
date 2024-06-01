@@ -206,6 +206,7 @@ def main():
 
     logging.info("\nBest matching song: %s with %d matches", best_candidate_name, max_match_count)
     logging.info("Recognition time: %.2f seconds", elapsed_time)
+    print(best_candidate_name)
 
 if __name__ == "__main__":
     main()
