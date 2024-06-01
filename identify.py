@@ -1,175 +1,211 @@
-import os
-import numpy as np
-import librosa
+from collections import namedtuple
 import sqlite3
+import sys
+import logging
+import time
+import scipy.io.wavfile as wavfile
 import argparse
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-import scipy.ndimage
+import numpy as np
+import scipy.fftpack
+from scipy.ndimage import maximum_filter
+from scipy.ndimage import generate_binary_structure, iterate_structure, binary_erosion
 
-def get_spectrogram(y, sr):
-    try:
-        print("Extracting spectrogram...")
-        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
-        S_db = librosa.amplitude_to_db(S, ref=np.max)
-        print("Spectrogram extracted successfully.")
-        return S_db
-    except Exception as e:
-        print(f"Error in get_spectrogram: {e}")
-        raise
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def find_peaks(spectrogram, threshold=20):
-    try:
-        print("Finding peaks in spectrogram...")
-        neighborhood_size = (3, 3)
-        data_max = scipy.ndimage.maximum_filter(spectrogram, size=neighborhood_size)
-        maxima = (spectrogram == data_max)
-        diff = (data_max - spectrogram) > threshold
-        maxima[diff] = False
-        peaks = np.argwhere(maxima)
-        print(f"Found {len(peaks)} peaks.")
-        return peaks
-    except Exception as e:
-        print(f"Error in find_peaks: {e}")
-        raise
-
-def generate_hashes(peaks, sr, fan_value=15):
-    try:
-        print("Generating hashes...")
-        hashes = []
-        num_peaks = len(peaks)
-        sample_rate = sr
-        hop_length = 512
-        n_fft = 2048
-        
-        # Generate FFT frequencies
-        freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=n_fft)
-        
-        # Generate a list of time samples for all frames
-        max_time_frame = max(peaks, key=lambda x: x[1])[1]
-        times = librosa.frames_to_samples(range(max_time_frame + 1), hop_length=hop_length)
-        
-        for i in range(num_peaks):
-            for j in range(1, fan_value):
-                if (i + j) < num_peaks:
-                    freq1_index, time1_frame = peaks[i]
-                    freq2_index, time2_frame = peaks[i + j]
-
-                    freq1 = freqs[freq1_index]
-                    freq2 = freqs[freq2_index]
-                    time1 = times[time1_frame] / sample_rate
-                    time2 = times[time2_frame] / sample_rate
-                    
-                    hash_pair = (freq1, freq2, time2 - time1)
-                    hashes.append((hash_pair, time1))
-        
-        print(f"Total hashes generated: {len(hashes)}")
-        return hashes
-    except Exception as e:
-        print(f"Error in generate_hashes: {e}")
-        raise
-
-def fingerprint_song(file_path):
-    try:
-        print(f"Fingerprinting song: {file_path}")
-        y, sr = librosa.load(file_path, sr=None)  # Load with native sampling rate
-        spectrogram = get_spectrogram(y, sr)
-        peaks = find_peaks(spectrogram)
-        hashes = generate_hashes(peaks, sr)
-        return hashes
-    except Exception as e:
-        print(f"Error in fingerprint_song for file {file_path}: {e}")
-        raise
-
-def insert_sample_hashes(cursor, sample_hashes):
-    print("Inserting sample hashes into temporary table...")
-    cursor.execute("CREATE TEMP TABLE IF NOT EXISTS sample_hashes (hash TEXT, offset INTEGER)")
-    for hash_pair, offset in sample_hashes:
-        hash_str = ','.join(map(str, hash_pair))
-        cursor.execute("INSERT INTO sample_hashes (hash, offset) VALUES (?, ?)", (hash_str, offset))
-    print("Sample hashes inserted.")
-
-def query_database_chunk(database_file, sample_hash_chunk):
-    print("Querying database chunk...")
-    conn = sqlite3.connect(database_file)
-    cursor = conn.cursor()
-
-    insert_sample_hashes(cursor, sample_hash_chunk)
+def generate_fingerprint(audio_data, fs=44100, frame_size=4096, overlap_ratio=0.5, fan_value=15):
+    """
+    Generate fingerprints for an audio signal.
     
-    cursor.execute("""
-        SELECT f.song_id, f.hash, f.offset, s.offset
-        FROM fingerprints f
-        JOIN sample_hashes s
-        ON f.hash = s.hash
-    """)
+    Parameters:
+    - audio_data: numpy array of audio data.
+    - fs: Sampling frequency.
+    - frame_size: Size of the FFT window.
+    - overlap_ratio: Ratio of overlap between frames.
+    - fan_value: Number of peaks to consider for hashing.
 
-    results = cursor.fetchall()
-    conn.close()
-    print(f"Database chunk query returned {len(results)} results.")
-    return results
+    Returns:
+    - hashes: List of hash values.
+    - offsets: Corresponding list of time offsets.
+    """
+    def get_spectrogram(audio_data, frame_size, overlap_ratio):
+        hop_size = int(frame_size * (1 - overlap_ratio))
+        window = np.hanning(frame_size)
+        spectrogram = []
+        for i in range(0, len(audio_data) - frame_size, hop_size):
+            frame = audio_data[i:i + frame_size]
+            windowed_frame = frame * window
+            spectrum = np.abs(scipy.fftpack.fft(windowed_frame)[:frame_size // 2])
+            spectrogram.append(spectrum)
+        return np.array(spectrogram).T
 
-def identify_sample(database_file, sample_file, batch_size=100):
-    try:
-        print(f"Identifying sample: {sample_file}")
-        sample_hashes = fingerprint_song(sample_file)
-        
-        if not sample_hashes:
-            print("Failed to generate hashes for the sample.")
-            return None
+    def get_peaks(spectrogram, amp_min=10):
+        struct = generate_binary_structure(2, 1)
+        neighborhood = iterate_structure(struct, 20)
+        local_max = maximum_filter(spectrogram, footprint=neighborhood) == spectrogram
+        background = (spectrogram == 0)
+        eroded_background = binary_erosion(background, structure=neighborhood, border_value=1)
+        detected_peaks = local_max ^ eroded_background
+        amps = spectrogram[detected_peaks]
+        j, i = np.where(detected_peaks)
+        peaks = zip(i, j, amps)
+        peaks_filtered = [x for x in peaks if x[2] > amp_min]
+        return peaks_filtered
 
-        sample_hashes = list(sample_hashes)
-        results = []
+    def generate_hashes(peaks, fan_value=15):
+        peaks.sort()
+        hashes = []
+        offsets = []
+        for i in range(len(peaks)):
+            for j in range(1, fan_value):
+                if (i + j) < len(peaks):
+                    freq1 = peaks[i][1]
+                    freq2 = peaks[i + j][1]
+                    t1 = peaks[i][0]
+                    t2 = peaks[i + j][0]
+                    time_delta = t2 - t1
+                    if 0 <= time_delta <= 200:
+                        hash_value = f"{freq1}|{freq2}|{time_delta}"
+                        hashes.append(hash_value)
+                        offsets.append(t1)
+        return hashes, offsets
 
-        with ThreadPoolExecutor() as executor:
-            futures = []
-            for i in range(0, len(sample_hashes), batch_size):
-                chunk = sample_hashes[i:i + batch_size]
-                futures.append(executor.submit(query_database_chunk, database_file, chunk))
-            
-            for future in futures:
-                chunk_results = future.result()
-                print(f"Chunk processed with {len(chunk_results)} results.")
-                results.extend(chunk_results)
+    spectrogram = get_spectrogram(audio_data, frame_size, overlap_ratio)
+    peaks = get_peaks(spectrogram)
+    hashes, offsets = generate_hashes(peaks, fan_value)
 
-        if not results:
-            print("No matching hashes found in the database.")
-            return None
+    return hashes, offsets
 
-        offset_counter = Counter()
-        for song_id, db_hash, db_offset, sample_offset in results:
-            # Ensure db_offset and sample_offset are decoded to integers
-            db_offset = int.from_bytes(db_offset, byteorder='big', signed=True) if isinstance(db_offset, bytes) else int(db_offset)
-            sample_offset = int.from_bytes(sample_offset, byteorder='big', signed=True) if isinstance(sample_offset, bytes) else int(sample_offset)
-            offset_diff = db_offset - sample_offset
-            offset_counter[(song_id, offset_diff)] += 1
+HashMatch = namedtuple('HashMatch', ['hash', 'offset', 'song_name'])
 
-        if not offset_counter:
-            print("No similar hashes found in the database.")
-            return None
+def get_input_values():
+    """
+    Parse command-line arguments to get the database filename and input sample filename.
 
-        best_match = max(offset_counter.items(), key=lambda x: x[1])
-        identified_song_id = best_match[0][0]
-        
-        return identified_song_id
-
-    except Exception as e:
-        print(f"Error identifying sample: {e}")
-        return None
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Identify a song sample.')
+    Returns:
+    - database_filename: Filename of the fingerprint database.
+    - input_file: Filename of the input audio sample.
+    """
+    parser = argparse.ArgumentParser(description='Identify sample against fingerprint database.')
     parser.add_argument('-d', '--database', required=True, help='Database file')
-    parser.add_argument('-i', '--input', required=True, help='Sample file')
+    parser.add_argument('-i', '--input', required=True, help='Input sample file')
     args = parser.parse_args()
+    return args.database, args.input
 
-    if not os.path.isfile(args.database):
-        print(f"The specified database file does not exist: {args.database}")
-    else:
-        if not os.path.isfile(args.input):
-            print(f"The specified sample file does not exist: {args.input}")
-        else:
-            result = identify_sample(args.database, args.input)
-            if result:
-                print(f'Identified song: {result}')
-            else:
-                print("Identification failed.")
+def load_database(database_filename):
+    """
+    Load the fingerprint database.
+
+    Parameters:
+    - database_filename: Filename of the fingerprint database.
+
+    Returns:
+    - conn: SQLite connection object.
+    - cursor: SQLite cursor object.
+    """
+    conn = sqlite3.connect(database_filename)
+    cursor = conn.cursor()
+    return conn, cursor
+
+def search_song(cursor, hashes):
+    """
+    Search for matching hashes in the fingerprint database.
+
+    Parameters:
+    - cursor: SQLite cursor object.
+    - hashes: List of hash values to search for.
+
+    Returns:
+    - List of HashMatch named tuples represents matching hashes.
+    """
+    placeholders = ', '.join(['?'] * len(hashes))
+    query = f"""
+        SELECT hash, offset, song_name
+        FROM fingerprints
+        WHERE hash IN ({placeholders})
+    """
+    cursor.execute(query, hashes)
+    return [HashMatch(*row) for row in cursor.fetchall()]
+
+def process_audio(audio_file):
+    """
+    Process an audio file and generate hashes.
+
+    Parameters:
+    - audio_file: Path to the audio file.
+
+    Returns:
+    - all_hashes: List of hash values generated from the audio.
+    - all_offsets: Corresponding list of time offsets for each hash.
+    """
+    _, channels = wavfile.read(audio_file)
+    all_hashes = []
+    all_offsets = []
+    for channel_index in range(0, 2):
+        hashes, offsets = generate_fingerprint(channels[:, channel_index])
+        all_hashes.extend(hashes)
+        all_offsets.extend(offsets)
+    return all_hashes, all_offsets
+
+def find_matches(database_filename, hashes):
+    """
+    Find matching hashes in the fingerprint database.
+
+    Parameters:
+    - database_filename: Filename of the fingerprint database.
+    - hashes: List of hash values to search for.
+
+    Returns:
+    - matches: List of HashMatch named tuples representing matching hashes.
+    """
+    conn, cursor = load_database(database_filename)
+    matches = search_song(cursor, hashes)
+    conn.close()
+    return matches
+
+def main():
+    """
+    Main function to identify a sample from fingerprint database.
+    Parameters:
+        - args: Command-line arguments containing input database and input song filename to identify.
+    """
+    database_filename, input_file = get_input_values()
+    logging.info(f'Database file: {database_filename}')
+    logging.info(f'Input file: {input_file}')
+
+    start_time = time.time()
+
+    try:
+        input_hashes, input_offsets = process_audio(input_file)
+    except FileNotFoundError:
+        logging.error("Input file not found.")
+        sys.exit(1)
+
+    logging.info("\nSearching for matches...")
+    
+    with ThreadPoolExecutor() as executor:
+        matches = executor.submit(find_matches, database_filename, input_hashes).result()
+    
+    hash_dict = {match.hash: match.offset for match in matches}
+    relative_offsets = [(match.song_name, match.offset - hash_dict[match.hash]) for match in matches]
+
+    logging.info("Possible hash matches: %d", len(relative_offsets))
+
+    candidate_counts = {}
+    max_match_count = 0
+    best_candidate_name = ''
+    for song_name, offset in relative_offsets:
+        candidate_counts.setdefault(song_name, {}).setdefault(offset, 0)
+        candidate_counts[song_name][offset] += 1
+        if candidate_counts[song_name][offset] > max_match_count:
+            max_match_count = candidate_counts[song_name][offset]
+            best_candidate_name = song_name
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
+    logging.info("\nBest matching song: %s with %d matches", best_candidate_name, max_match_count)
+    logging.info("Recognition time: %.2f seconds", elapsed_time)
+
+if __name__ == "__main__":
+    main()

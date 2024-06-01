@@ -22,5 +22,5 @@ def check_database_integrity(database_file):
         print(f"Error checking database integrity: {e}")
 
 if __name__ == "__main__":
-    database_file = "database-file.sql"  # Replace with the actual database file name
+    database_file = "db.sql"  # Replace with the actual database file name
     check_database_integrity(database_file)
